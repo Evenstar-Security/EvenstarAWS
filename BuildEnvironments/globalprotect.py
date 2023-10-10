@@ -98,17 +98,23 @@ class build():
     #Step 3 - Launch RHEL Web Server ami-026ebd4cfe2c043b2
     def web_server():
         return 0
-    
-    #Step 4 - Configure NGINX on Web Server
-    def configure_nginx():
-        return 0
 
-    #Step 5 - Launch N NGFWs with ami-0efe54d5b2db9e6da
+    #Step 4 - Launch N NGFWs with ami-0efe54d5b2db9e6da
     def palos(N: int, security_group_id: str, key_name: str):
         ec2_client = session.client('ec2')
         responses = []
         for i in range(1,N+1):
             create_response = ec2_client.run_instances(
+                BlockDeviceMappings=[
+                    {
+                        'Ebs': {
+                            'DeleteOnTermination': True,
+                            'VolumeSize': 60,
+                            'VolumeType': 'standard',
+                        },
+                        'NoDevice': 'string'
+                    },
+                ],
                 ImageId = "ami-0efe54d5b2db9e6da",
                 InstanceType = "m4.large",
                 KeyName = key_name,
@@ -147,7 +153,7 @@ class build():
                     time.sleep(10)
         return responses
     
-    #Step 6 Add Data Interface
+    #Step 5 Add Data Interface
     def interfaces(instance_ids: list):
         #Create and attach the external interface
         ec2_client = session.client('ec2')
@@ -183,7 +189,11 @@ class build():
             print("External data interface attached to instance", instance_ids[i])
     
 class configure():    
-    #Step 1 - Set initial palo configuration: admin pw, interface swap, http mgmt
+    #Step 1 - Configure web server
+    def web_server():
+        return 0
+
+    #Step 2 - Set initial palo configuration: admin pw, interface swap, http mgmt
     def palos(ips: list, admin_password: str, key_string: str):
         commands = [
             'configure\n',
@@ -216,7 +226,7 @@ class configure():
                     con = False
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            not_really_a_file = StringIO.StringIO(key_string)
+            not_really_a_file = StringIO(key_string)
             pkey = paramiko.RSAKey.from_private_key(not_really_a_file)
             not_really_a_file.close()
             con = True
@@ -228,9 +238,10 @@ class configure():
                 except Exception as error:
                     print("Can't connect to SSH yet")
                     print(error)
+                    time.sleep(10)
         return 0
     
-    #Step 2 - Adjust network interface configurations on Palo EC2 instance
+    #Step 3 - Adjust network interface configurations on Palo EC2 instance
     def interfaces(network_interface_id: str):
         ec2_client = session.client('ec2')
         modify_response = ec2_client.modify_network_interface_attribute(
