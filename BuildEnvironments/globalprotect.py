@@ -9,7 +9,7 @@ from io import StringIO
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-with open("../../sysinfo/globalprotect.json","r") as f:
+with open(str(BASE_DIR)+"/../sysinfo/globalprotect.json","r") as f:
     sysinfo = json.load(f)
 
 session = boto3.Session(
@@ -105,16 +105,16 @@ class build():
         responses = []
         for i in range(1,N+1):
             create_response = ec2_client.run_instances(
-                BlockDeviceMappings=[
-                    {
-                        'Ebs': {
-                            'DeleteOnTermination': True,
-                            'VolumeSize': 60,
-                            'VolumeType': 'standard',
-                        },
-                        'NoDevice': 'string'
-                    },
-                ],
+                #BlockDeviceMappings=[
+                #    {
+                #        'Ebs': {
+                #            'DeleteOnTermination': True,
+                #            'VolumeSize': 60,
+                #            'VolumeType': 'standard',
+                #        },
+                #        'NoDevice': 'string'
+                #    },
+                #],
                 ImageId = "ami-0efe54d5b2db9e6da",
                 InstanceType = "m4.large",
                 KeyName = key_name,
@@ -154,8 +154,9 @@ class build():
         return responses
     
     #Step 5 Add Data Interface
-    def interfaces(instance_ids: list):
+    def interfaces(instance_ids: list, security_group_id: str):
         #Create and attach the external interface
+        responses = []
         ec2_client = session.client('ec2')
         for i in range(len(instance_ids)):
             student_num = i+1
@@ -163,9 +164,9 @@ class build():
                 Description='Student '+str(student_num+1)+' Internet Interface',
                 DryRun=False,
                 Groups=[
-                    sysinfo["group"]
+                    security_group_id
                 ],
-                PrivateIpAddress=sysinfo['ext_subnet']+str(student_num*2+3),
+                PrivateIpAddress=sysinfo['subnet']+str(student_num*2+3),
                 SubnetId=sysinfo["subnet_id"],
                 EnablePrimaryIpv6=False
             )
@@ -185,8 +186,10 @@ class build():
                 except:
                     print("Not running yet")
                     time.sleep(10)
+            responses.append([interface_response,attach_response])
 
             print("External data interface attached to instance", instance_ids[i])
+        return(responses)
     
 class configure():    
     #Step 1 - Configure web server
@@ -194,25 +197,24 @@ class configure():
         return 0
 
     #Step 2 - Set initial palo configuration: admin pw, interface swap, http mgmt
-    def palos(ips: list, admin_password: str, key_string: str):
+    def palos(ips: list, admin_phash: str, key_string: str):
         commands = [
             'configure\n',
             #Set admin password for logging in
-            'set mgt-config users admin password\n',
-            admin_password+"\n",
-            admin_password+"\n",
+            'set mgt-config users admin phash '+admin_phash+'\n',
+            #admin_password+"\n",
+            #admin_password+"\n",
             #Set http management
-            'set deviceconfig system service disable-http no\n'
+            #'set deviceconfig system service disable-http no\n'
             'commit\n',
             'exit\n',
-
             #Swap management interface
-            'set system setting mgmt-interface-swap enable yes\n',
-            'y',
+            #'set system setting mgmt-interface-swap enable yes\n',
+            #'y',
 
             #Restart system
-            'request restart system\n',
-            'y',
+            #'request restart system\n',
+            #'y',
         ]
         for ip in ips:
             con = True
@@ -234,6 +236,17 @@ class configure():
                 try:
                     ssh.connect(ip,username="admin",pkey=pkey)
                     print("SSH successfully connected")
+                    #Invoke shell
+                    shell = ssh.invoke_shell()
+                    #Send commands
+                    for command in commands:
+                        shell.send(command)
+                        time.sleep(1)
+                        #Print output
+                        output = shell.recv(10000)
+                        print(output.decode('ascii'))
+                    ssh.close()
+                    print("SSH connection closed")
                     con = False
                 except Exception as error:
                     print("Can't connect to SSH yet")
@@ -242,14 +255,17 @@ class configure():
         return 0
     
     #Step 3 - Adjust network interface configurations on Palo EC2 instance
-    def interfaces(network_interface_id: str):
+    def interfaces(network_interface_ids: list):
+        modify_responses = []
         ec2_client = session.client('ec2')
-        modify_response = ec2_client.modify_network_interface_attribute(
-            NetworkInterfaceId = network_interface_id,
-            SourceDestCheck={ 'Value': False }
-        )
+        for network_interface_id in network_interface_ids:
+            modify_response = ec2_client.modify_network_interface_attribute(
+                NetworkInterfaceId = network_interface_id,
+                SourceDestCheck={ 'Value': False }
+            )
+            modify_responses.append(modify_response)
 
-        return modify_response
+        return modify_responses
 
 class destroy():
 
@@ -296,31 +312,40 @@ def main():
     print("The key is",key_pair['KeyMaterial'])
 
     #Palo EC2 Instances
-    palos = build.palos(N=1, security_group_id=security_group['GroupId'], key_name=key_pair['KeyName'])
-    print("InstanceID:",palos[0]['Instances'][0]['InstanceId'])
-
-    #Build List of IPs
-    ips = []
-    for i in range(len(palos)):
-        ips.append(palos[i]['Instances'][0]['PublicIpAddress'])
+    palos = build.palos(N=10, security_group_id=security_group['GroupId'], key_name=key_pair['KeyName'])
 
     #Build List of Instance IDs
+    print("Instance IDs are:")
     instance_ids = []
     for i in range(len(palos)):
-        instance_ids.append(palos[i]['Instances'][0]['InstanceId'])  
+        print(palos[i]['Instances'][0]['InstanceId'])
+        instance_ids.append(palos[i]['Instances'][0]['InstanceId']) 
 
-    #Configure Palo
-    configure.palos(ips=ips,admin_password=sysinfo['admin_password'],key_string=key_pair['KeyMaterial'])  
+    #Build List of IPs
+    print("Public IP Addresses are:")
+    ips = []
+    for i in range(len(palos)):
+        print(palos[i]['Instances'][0]['PublicIpAddress'])
+        ips.append(palos[i]['Instances'][0]['PublicIpAddress'])
 
     #Create and attach additional network interface
+    interface_response = build.interfaces(instance_ids=instance_ids, security_group_id= security_group['GroupId'])
+
+    #Build a list of network interface IDs
+    network_interface_ids = []
+    for i in range(len(interface_response)):
+        network_interface_ids.append(interface_response[i][0]['NetworkInterface']['NetworkInterfaceId'])
+
+    #Configure Palo
+    #configure.palos(ips=ips,admin_phash=sysinfo['admin_phash'],key_string= key_pair['KeyMaterial'])  
 
     #Configure network interfaces
-
+    #configure.interfaces(network_interface_ids=network_interface_ids)
 
     #Destroy everything
-    destroy.palos(instance_ids=instance_ids)
-    destroy.security_group(security_group['GroupId'])
-    destroy.key_pair(key_pair_id=key_pair['KeyPairId'])
+    #destroy.palos(instance_ids=instance_ids)
+    #destroy.security_group(security_group['GroupId'])
+    #destroy.key_pair(key_pair_id=key_pair['KeyPairId'])
     return 0
 
 main()
